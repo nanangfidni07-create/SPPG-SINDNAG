@@ -1,29 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { auth, db } from './firebase';
 import {
-  signInAnonymously,
-  signInWithCustomToken,
-  onAuthStateChanged
-} from 'firebase/auth';
+  signInUser,
+  getCurrentUser,
+  addNutritionLog,
+  addQualityLog,
+  getNutritionLogs,
+  getQualityLogs,
+  signOut
+} from './supabaseClient';
 import {
-  collection,
-  addDoc,
-  onSnapshot,
-  query,
-  orderBy,
-  serverTimestamp
-} from 'firebase/firestore';
-import {
-  LayoutDashboard,
   Utensils,
   ShieldCheck,
   School,
   Search,
   LogOut
 } from 'lucide-react';
-
-const appId = import.meta.env.VITE_APP_ID || window.__app_id || 'monitoring-gizi-vercel';
-const initialAuthToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN || window.__initial_auth_token;
 
 const LIST_SEKOLAH = [
   'SDN Dermayu',
@@ -55,41 +46,41 @@ export default function App() {
   useEffect(() => {
     const initAuth = async () => {
       try {
-        if (initialAuthToken) {
-          await signInWithCustomToken(auth, initialAuthToken);
-        } else {
-          await signInAnonymously(auth);
-        }
+        await signInUser();
+        const user = await getCurrentUser();
+        setUser(user);
       } catch (err) {
-        console.error('Auth error:', err);
+        console.error('[v0] Auth error:', err);
+      } finally {
+        setLoading(false);
       }
     };
 
     initAuth();
-    return onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
   }, []);
 
   useEffect(() => {
     if (!user) return;
 
-    const qNut = query(collection(db, 'artifacts', appId, 'public', 'data', 'nutrition'), orderBy('timestamp', 'desc'));
-    const qQC = query(collection(db, 'artifacts', appId, 'public', 'data', 'quality'), orderBy('timestamp', 'desc'));
-
-    const unsubNut = onSnapshot(qNut, (snap) => {
-      setNutLogs(snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
-    });
-
-    const unsubQC = onSnapshot(qQC, (snap) => {
-      setQcLogs(snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
-    });
-
-    return () => {
-      unsubNut();
-      unsubQC();
+    const loadData = async () => {
+      try {
+        const [nutData, qcData] = await Promise.all([
+          getNutritionLogs(),
+          getQualityLogs()
+        ]);
+        setNutLogs(nutData);
+        setQcLogs(qcData);
+      } catch (err) {
+        console.error('[v0] Load data error:', err);
+      }
     };
+
+    loadData();
+
+    // Set up polling for real-time updates
+    const interval = setInterval(loadData, 5000);
+
+    return () => clearInterval(interval);
   }, [user]);
 
   const handleAction = async (type, data) => {
@@ -99,19 +90,28 @@ export default function App() {
     }
 
     try {
-      const colName = type === 'nut' ? 'nutrition' : 'quality';
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', colName), {
-        ...data,
-        timestamp: serverTimestamp(),
-        userId: user.uid
-      });
+      if (type === 'nut') {
+        await addNutritionLog(data);
+      } else {
+        await addQualityLog(data);
+      }
       alert('Data berhasil disimpan!');
       setView('dashboard');
       setNutForm({ school: LIST_SEKOLAH[0], menu: '', porsi: '' });
       setQcForm({ school: LIST_SEKOLAH[0], rasa: 5, suhu: 5, bersih: 5, catatan: '' });
+      
+      // Reload data after a short delay
+      setTimeout(async () => {
+        const [nutData, qcData] = await Promise.all([
+          getNutritionLogs(),
+          getQualityLogs()
+        ]);
+        setNutLogs(nutData);
+        setQcLogs(qcData);
+      }, 500);
     } catch (err) {
-      console.error(err);
-      alert('Gagal menyimpan data.');
+      console.error('[v0] Action error:', err);
+      alert('Gagal menyimpan data: ' + (err.message || 'Unknown error'));
     }
   };
 
@@ -139,7 +139,17 @@ export default function App() {
               <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Monitoring Gizi</p>
             </div>
           </div>
-          <button className="text-slate-500 hover:text-red-500 transition">
+          <button 
+            onClick={async () => {
+              try {
+                await signOut();
+                setUser(null);
+              } catch (err) {
+                console.error('[v0] Logout error:', err);
+              }
+            }}
+            className="text-slate-500 hover:text-red-500 transition"
+          >
             <LogOut size={20} />
           </button>
         </div>
