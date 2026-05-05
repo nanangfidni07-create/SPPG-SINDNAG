@@ -1,18 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { auth, db } from './firebase';
-import {
-  signInAnonymously,
-  signInWithCustomToken,
-  onAuthStateChanged
-} from 'firebase/auth';
-import {
-  collection,
-  addDoc,
-  onSnapshot,
-  query,
-  orderBy,
-  serverTimestamp
-} from 'firebase/firestore';
+import { supabase } from './supabaseClient';
 import {
   LayoutDashboard,
   Utensils,
@@ -23,7 +10,6 @@ import {
 } from 'lucide-react';
 
 const appId = import.meta.env.VITE_APP_ID || window.__app_id || 'monitoring-gizi-vercel';
-const initialAuthToken = import.meta.env.VITE_INITIAL_AUTH_TOKEN || window.__initial_auth_token;
 
 const LIST_SEKOLAH = [
   'SDN Dermayu',
@@ -43,68 +29,155 @@ const LIST_SEKOLAH = [
 
 export default function App() {
   const [view, setView] = useState('dashboard');
+  const [sessionId, setSessionId] = useState(null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [nutLogs, setNutLogs] = useState([]);
   const [qcLogs, setQcLogs] = useState([]);
+  const [syncError, setSyncError] = useState(null);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authError, setAuthError] = useState(null);
 
   const [nutForm, setNutForm] = useState({ school: LIST_SEKOLAH[0], menu: '', porsi: '' });
   const [qcForm, setQcForm] = useState({ school: LIST_SEKOLAH[0], rasa: 5, suhu: 5, bersih: 5, catatan: '' });
 
   useEffect(() => {
+    const storedSession = localStorage.getItem('sppg_session_id');
+    const id = storedSession || crypto.randomUUID?.() || `guest-${Math.random().toString(36).slice(2)}`;
+    if (!storedSession) {
+      localStorage.setItem('sppg_session_id', id);
+    }
+    setSessionId(id);
+
     const initAuth = async () => {
-      try {
-        if (initialAuthToken) {
-          await signInWithCustomToken(auth, initialAuthToken);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (err) {
-        console.error('Auth error:', err);
-      }
+      const {
+        data: { session }
+      } = await supabase.auth.getSession();
+      setUser(session?.user ?? null);
+      setLoading(false);
     };
 
     initAuth();
-    return onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-  }, []);
 
-  useEffect(() => {
-    if (!user) return;
-
-    const qNut = query(collection(db, 'artifacts', appId, 'public', 'data', 'nutrition'), orderBy('timestamp', 'desc'));
-    const qQC = query(collection(db, 'artifacts', appId, 'public', 'data', 'quality'), orderBy('timestamp', 'desc'));
-
-    const unsubNut = onSnapshot(qNut, (snap) => {
-      setNutLogs(snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
-    });
-
-    const unsubQC = onSnapshot(qQC, (snap) => {
-      setQcLogs(snap.docs.map((doc) => ({ id: doc.id, ...doc.data() })));
+    const { subscription } = supabase.auth.onAuthStateChange((event, session) => {
+      setUser(session?.user ?? null);
     });
 
     return () => {
-      unsubNut();
-      unsubQC();
+      subscription.unsubscribe();
     };
-  }, [user]);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId) return;
+
+    let isMounted = true;
+
+    const loadLogs = async () => {
+      try {
+        setLoading(true);
+        setSyncError(null);
+
+        const { data: nutData, error: nutError } = await supabase
+          .from('nutrition')
+          .select('*')
+          .eq('app_id', appId)
+          .order('timestamp', { ascending: false });
+
+        const { data: qcData, error: qcError } = await supabase
+          .from('quality')
+          .select('*')
+          .eq('app_id', appId)
+          .order('timestamp', { ascending: false });
+
+        if (!isMounted) return;
+        if (nutError || qcError) {
+          throw nutError || qcError;
+        }
+
+        setNutLogs(nutData || []);
+        setQcLogs(qcData || []);
+      } catch (err) {
+        console.error('Supabase sync error:', err);
+        setSyncError(err.message || 'Gagal menyinkronkan data.');
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+
+    loadLogs();
+
+    const channel = supabase
+      .channel(`sppg-sync-${appId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'nutrition', filter: `app_id=eq.${appId}` },
+        () => {
+          loadLogs();
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'quality', filter: `app_id=eq.${appId}` },
+        () => {
+          loadLogs();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      isMounted = false;
+      supabase.removeChannel(channel);
+    };
+  }, [sessionId]);
+
+  const handleSignIn = async () => {
+    try {
+      setLoading(true);
+      setAuthError(null);
+
+      const { error } = await supabase.auth.signInWithPassword({
+        email: authEmail,
+        password: authPassword
+      });
+
+      if (error) throw error;
+      setView('dashboard');
+    } catch (err) {
+      console.error('Sign in error:', err);
+      setAuthError(err.message || 'Gagal masuk. Periksa email dan password.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    setView('dashboard');
+  };
 
   const handleAction = async (type, data) => {
-    if (!user) {
-      alert('Silakan tunggu autentikasi terlebih dahulu.');
+    if (!sessionId) {
+      alert('Silakan tunggu sinkronisasi terlebih dahulu.');
       return;
     }
 
     try {
       const colName = type === 'nut' ? 'nutrition' : 'quality';
-      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', colName), {
+      const payload = {
+        app_id: appId,
         ...data,
-        timestamp: serverTimestamp(),
-        userId: user.uid
-      });
+        timestamp: new Date().toISOString(),
+        session_id: sessionId,
+        auth_user_id: user?.id || null
+      };
+
+      const { error } = await supabase.from(colName).insert([payload]);
+      if (error) throw error;
+
       alert('Data berhasil disimpan!');
       setView('dashboard');
       setNutForm({ school: LIST_SEKOLAH[0], menu: '', porsi: '' });
@@ -119,7 +192,7 @@ export default function App() {
     return (
       <div className="h-screen w-full flex items-center justify-center bg-slate-50">
         <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-        <p className="ml-4 text-slate-500 font-medium">Menghubungkan ke SPPG Cloud...</p>
+        <p className="ml-4 text-slate-500 font-medium">Menghubungkan ke Supabase...</p>
       </div>
     );
   }
@@ -139,13 +212,76 @@ export default function App() {
               <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Monitoring Gizi</p>
             </div>
           </div>
-          <button className="text-slate-500 hover:text-red-500 transition">
-            <LogOut size={20} />
-          </button>
+          <div className="flex items-center gap-4">
+            {user ? (
+              <span className="text-sm text-slate-500">{user.email}</span>
+            ) : (
+              <span className="text-sm text-slate-500">Guest</span>
+            )}
+            <button
+              type="button"
+              onClick={user ? handleSignOut : () => setView('login')}
+              className="rounded-full border border-slate-200 p-2 text-slate-500 hover:border-red-300 hover:text-red-500 transition"
+            >
+              <LogOut size={20} />
+            </button>
+          </div>
         </div>
       </nav>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
+        {syncError && (
+          <div className="rounded-3xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 mb-6">
+            Terjadi masalah sinkronisasi dengan Supabase: {syncError}
+          </div>
+        )}
+        {view === 'login' && (
+          <section className="rounded-[2rem] border border-slate-100 bg-white p-6 shadow-sm">
+            <div className="mb-6">
+              <h2 className="text-2xl font-bold text-slate-900">Masuk dengan Supabase</h2>
+              <p className="mt-2 text-sm text-slate-500">
+                Gunakan email dan password untuk masuk sebagai authenticated user.
+              </p>
+            </div>
+            {authError && (
+              <div className="mb-4 rounded-2xl bg-red-50 p-4 text-sm text-red-700 border border-red-200">
+                {authError}
+              </div>
+            )}
+            <div className="grid gap-4">
+              <input
+                type="email"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+                placeholder="Email"
+                className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+              />
+              <input
+                type="password"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                placeholder="Password"
+                className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+              />
+            </div>
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <button
+                type="button"
+                onClick={handleSignIn}
+                className="rounded-3xl bg-blue-600 px-6 py-3 text-white shadow-sm hover:bg-blue-700 transition"
+              >
+                Masuk
+              </button>
+              <button
+                type="button"
+                onClick={() => setView('dashboard')}
+                className="rounded-3xl border border-slate-200 bg-white px-6 py-3 text-slate-600 hover:bg-slate-50 transition"
+              >
+                Lanjutkan sebagai Guest
+              </button>
+            </div>
+          </section>
+        )}
         {view === 'dashboard' && (
           <div className="space-y-8">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
