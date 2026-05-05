@@ -33,31 +33,53 @@ const LIST_SEKOLAH = [
 ].sort();
 
 export default function App() {
-  const [view, setView] = useState('dashboard');
+  const [view, setView] = useState('login');
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [nutLogs, setNutLogs] = useState([]);
   const [qcLogs, setQcLogs] = useState([]);
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
 
   const [nutForm, setNutForm] = useState({ school: LIST_SEKOLAH[0], menu: '', porsi: '' });
   const [qcForm, setQcForm] = useState({ school: LIST_SEKOLAH[0], rasa: 5, suhu: 5, bersih: 5, catatan: '' });
 
+  // Auto-login on load
   useEffect(() => {
-    const initAuth = async () => {
+    const checkExistingSession = async () => {
       try {
-        await signInUser();
         const user = await getCurrentUser();
-        setUser(user);
+        if (user) {
+          setUser(user);
+          setView('dashboard');
+        }
       } catch (err) {
-        console.error('[v0] Auth error:', err);
-      } finally {
-        setLoading(false);
+        console.error('[v0] Session check error:', err);
       }
     };
 
-    initAuth();
+    checkExistingSession();
   }, []);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      const user = await signInUser();
+      if (user) {
+        setUser(user.user);
+        setUsername('');
+        setPassword('');
+        setView('dashboard');
+      }
+    } catch (err) {
+      console.error('[v0] Login error:', err);
+      alert('Login gagal: ' + (err.message || 'Unknown error'));
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -115,11 +137,89 @@ export default function App() {
     }
   };
 
-  if (loading) {
+  if (view === 'login') {
     return (
-      <div className="h-screen w-full flex items-center justify-center bg-slate-50">
-        <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-        <p className="ml-4 text-slate-500 font-medium">Menghubungkan ke SPPG Cloud...</p>
+      <div className="min-h-screen bg-gradient-to-br from-blue-600 to-blue-800 flex items-center justify-center px-4">
+        <div className="w-full max-w-md">
+          <div className="bg-white rounded-3xl shadow-2xl p-8">
+            <div className="flex justify-center mb-8">
+              <div className="bg-blue-600 p-4 rounded-2xl text-white shadow-md">
+                <School size={32} />
+              </div>
+            </div>
+            <h1 className="text-3xl font-bold text-center text-slate-900 mb-2">SPPG Sindang</h1>
+            <p className="text-center text-slate-500 mb-8">Sistem Monitoring Gizi Sekolah</p>
+
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">Username</label>
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="Masukkan username"
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">Password</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Masukkan password"
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                  disabled={loading}
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full rounded-2xl bg-blue-600 px-5 py-3 text-white font-semibold hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {loading ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    Mengautentikasi...
+                  </>
+                ) : (
+                  'Masuk'
+                )}
+              </button>
+            </form>
+
+            <div className="mt-6 pt-6 border-t border-slate-200 text-center">
+              <p className="text-sm text-slate-500 mb-4">Atau masuk sebagai guest</p>
+              <button
+                type="button"
+                onClick={async () => {
+                  setLoading(true);
+                  try {
+                    const user = await signInUser();
+                    if (user) {
+                      setUser(user.user);
+                      setView('dashboard');
+                    }
+                  } catch (err) {
+                    console.error('[v0] Guest login error:', err);
+                    alert('Guest login gagal');
+                  } finally {
+                    setLoading(false);
+                  }
+                }}
+                disabled={loading}
+                className="w-full rounded-2xl bg-slate-100 text-slate-700 px-5 py-3 font-semibold hover:bg-slate-200 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Login Sebagai Guest
+              </button>
+            </div>
+          </div>
+
+          <p className="text-center text-white text-xs mt-8 opacity-80">
+            © 2026 SPPG Sindang. All rights reserved.
+          </p>
+        </div>
       </div>
     );
   }
